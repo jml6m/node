@@ -1656,7 +1656,8 @@ static MaybeLocal<Function> CompileFunctionForCJSLoader(
     bool* cache_rejected,
     bool is_cjs_scope,
     ScriptCompiler::CachedData* cached_data,
-    Local<Symbol> host_defined_option_symbol) {
+    Local<Symbol> host_defined_option_symbol,
+    bool eager_compile) {
   Isolate* isolate = Isolate::GetCurrent();
   EscapableHandleScope scope(isolate);
 
@@ -1685,10 +1686,20 @@ static MaybeLocal<Function> CompileFunctionForCJSLoader(
 
   ScriptCompiler::Source source(code, origin, cached_data);
   ScriptCompiler::CompileOptions options;
-  if (cached_data == nullptr) {
-    options = ScriptCompiler::kNoCompileOptions;
-  } else {
+  if (cached_data != nullptr) {
     options = ScriptCompiler::kConsumeCodeCache;
+  } else if (eager_compile) {
+    // kEagerCompile is mutually exclusive with every other CompileOptions
+    // bit (including kConsumeCodeCache), so this only applies when there is
+    // no cache to consume: forcing eager compilation trades startup-time
+    // parse/compile cost now for skipping V8's lazy inner-function
+    // compilation later. That's only a plausible win for callers that know
+    // most of the compiled code is about to run anyway (e.g. a
+    // single-purpose entry point), not for ordinary CommonJS modules where
+    // much of the loaded code may never execute.
+    options = ScriptCompiler::kEagerCompile;
+  } else {
+    options = ScriptCompiler::kNoCompileOptions;
   }
 
   LocalVector<String> params(isolate);
@@ -1702,7 +1713,6 @@ static MaybeLocal<Function> CompileFunctionForCJSLoader(
       params.data(),
       0,       /* context extensions size */
       nullptr, /* context extensions data */
-      // TODO(joyeecheung): allow optional eager compilation.
       options);
 
   Local<Function> fn;
@@ -1785,6 +1795,15 @@ static void CompileFunctionForCJSLoader(
   }
 #endif
 
+  // A SEA main script that doesn't already have a code cache to consume is
+  // compiling cold on every launch. Since it's a single-purpose entry point
+  // that's expected to run virtually all of its own code, eagerly compiling
+  // it (instead of deferring inner-function compilation to first call) is a
+  // plausible win, unlike for ordinary CommonJS modules loaded via
+  // require(). kEagerCompile can't be combined with kConsumeCodeCache, so
+  // this only ever applies when there's no cache.
+  bool eager_compile = is_sea_main && cached_data == nullptr;
+
   {
     ShouldNotAbortOnUncaughtScope no_abort_scope(realm->env());
     TryCatchScope try_catch(env);
@@ -1795,7 +1814,8 @@ static void CompileFunctionForCJSLoader(
                                      &cache_rejected,
                                      true,
                                      cached_data,
-                                     host_defined_option_symbol)
+                                     host_defined_option_symbol,
+                                     eager_compile)
              .ToLocal(&fn)) {
       CHECK(try_catch.HasCaught());
       CHECK(!try_catch.HasTerminated());
@@ -1963,7 +1983,8 @@ static void ContainsModuleSyntax(const FunctionCallbackInfo<Value>& args) {
                                     &cache_rejected,
                                     cjs_var,
                                     nullptr,
-                                    env->vm_dynamic_import_default_internal())
+                                    env->vm_dynamic_import_default_internal(),
+                                    false /* eager_compile */)
             .ToLocal(&fn)) {
       args.GetReturnValue().Set(false);
       return;
