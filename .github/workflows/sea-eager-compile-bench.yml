@@ -5,34 +5,56 @@ on:
     types: [opened, synchronize, reopened]
 
 jobs:
-  build-and-benchmark:
+  build:
+    strategy:
+      matrix:
+        side: [before, after]
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
-      - name: Checkout PR head
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
+          ref: ${{ matrix.side == 'before' && github.event.pull_request.base.sha || github.event.pull_request.head.sha }}
 
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y python3 g++ make
 
-      - name: Build "before" (PR base commit)
+      - name: Build
         run: |
-          rm -rf out
-          git checkout ${{ github.event.pull_request.base.sha }}
           python3 ./configure
           make -j"$(nproc)"
-          mkdir -p artifacts
-          cp out/Release/node artifacts/node-before
 
-      - name: Build "after" (PR head / patched)
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ matrix.side }}
+          path: out/Release/node
+          retention-days: 14
+
+  benchmark:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download "before" binary
+        uses: actions/download-artifact@v4
+        with:
+          name: node-before
+          path: artifacts/before
+
+      - name: Download "after" binary
+        uses: actions/download-artifact@v4
+        with:
+          name: node-after
+          path: artifacts/after
+
+      - name: Prep binaries
         run: |
-          rm -rf out
-          git checkout ${{ github.event.pull_request.head.sha }}
-          python3 ./configure
-          make -j"$(nproc)"
-          cp out/Release/node artifacts/node-after
+          mkdir -p bench
+          cp artifacts/before/node bench/node-before
+          cp artifacts/after/node bench/node-after
+          chmod +x bench/node-before bench/node-after
 
       - name: Generate SEA benchmark fixture
         run: |
@@ -48,8 +70,8 @@ jobs:
             }
             print "const end = process.hrtime.bigint();";
             print "console.error(\x27exec_ns=\x27 + (end - start).toString() + \x27 total=\x27 + total);";
-          }' > artifacts/sea-bench.js
-          cat > artifacts/sea-config.json <<'EOF'
+          }' > bench/sea-bench.js
+          cat > bench/sea-config.json <<'EOF'
           {
             "main": "sea-bench.js",
             "output": "sea-bench.blob",
@@ -60,7 +82,7 @@ jobs:
 
       - name: Build and benchmark both SEAs
         run: |
-          cd artifacts
+          cd bench
           for label in before after; do
             rm -f sea-bench.blob "sea-bench-$label"
             "./node-$label" --experimental-sea-config sea-config.json
@@ -97,13 +119,10 @@ jobs:
             echo "| $label | ${mean}ms |$runs |" >> "$GITHUB_STEP_SUMMARY"
           done
 
-      - name: Upload artifacts
+      - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sea-eager-compile-${{ github.event.pull_request.head.sha }}
-          path: |
-            artifacts/node-before
-            artifacts/node-after
-            artifacts/results.txt
+          name: sea-eager-compile-results-${{ github.event.pull_request.head.sha }}
+          path: bench/results.txt
           retention-days: 14
