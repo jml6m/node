@@ -1706,14 +1706,14 @@ static MaybeLocal<Function> CompileFunctionForCJSLoader(
   if (is_cjs_scope) {
     params = GetCJSParameters(env->isolate_data());
   }
-  MaybeLocal<Function> maybe_fn = ScriptCompiler::CompileFunction(
-      context,
-      &source,
-      params.size(),
-      params.data(),
-      0,       /* context extensions size */
-      nullptr, /* context extensions data */
-      options);
+  MaybeLocal<Function> maybe_fn =
+      ScriptCompiler::CompileFunction(context,
+                                      &source,
+                                      params.size(),
+                                      params.data(),
+                                      0,       /* context extensions size */
+                                      nullptr, /* context extensions data */
+                                      options);
 
   Local<Function> fn;
   if (!maybe_fn.ToLocal(&fn)) {
